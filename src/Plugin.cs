@@ -19,7 +19,7 @@ namespace NixiItemInspect
     {
         public const string Guid = "nixi.iteminspect";
         public const string Name = "Item Inspect";
-        public const string Version = "1.0.0";
+        public const string Version = "1.0.1";
 
         internal static ManualLogSource Log;
 
@@ -159,6 +159,7 @@ namespace NixiItemInspect
                     _bridge = 0f;
                 }
                 else { _time = 0f; _bridge = -1f; }
+                Stabilizer.Begin(character, item);
                 Hands.Begin(character, item, ItemStyles.WantsOneHand((Component)item, _oneHandItems.Value, _oneHandSmall.Value));
             }
 
@@ -236,7 +237,7 @@ namespace NixiItemInspect
             LocalRot = Quaternion.Euler(_eul);
             Vector3 defaultPos = Refs.DefaultPos(item);
             LocalPos = _bringCloser.Value
-                ? new Vector3(-defaultPos.x * (Hands.OneHanded ? 0.45f : 0.9f) * _pos.x, _pos.y, _pos.z)
+                ? new Vector3(-defaultPos.x * (Hands.OneHanded ? 0.45f : 0.9f) * _pos.x, _pos.y, _pos.z * Stabilizer.TowardFaceScale)
                 : Vector3.zero;
 
             // Анимация закончилась, предмет вернулся, руки на месте — выключаемся.
@@ -248,6 +249,7 @@ namespace NixiItemInspect
         private void StartSwing(object item)
         {
             InspectedItem = item;
+            Stabilizer.Begin(Refs.LocalCharacter(), item);
             _eul = Wrap(_eul);
             _anim = InspectAnim.Swing;
             _time = 0f;
@@ -262,6 +264,7 @@ namespace NixiItemInspect
         private void ResetAll()
         {
             Hands.Restore();
+            Stabilizer.Restore();
             Active = false;
             InspectedItem = null;
             _anim = null;
@@ -308,6 +311,86 @@ namespace NixiItemInspect
                 || Refs.GetBool(Refs.F_passedOut, data)
                 || Refs.GetBool(Refs.F_fullyPassedOut, data)
                 || Refs.GetBool(Refs.P_dead, data);
+        }
+    }
+
+    // ---------------- Стабилизация предмета на время осмотра ----------------
+    // У некоторых предметов (например, Пуговичный гриб) игра смещает центр масс от точки хвата
+    // (компонент CenterOfMass, чтобы предмет «правильно» падал на землю). Игра тянет предмет за точку хвата,
+    // а вращается он вокруг смещённого центра масс — при осмотре его начинает раскачивать влево-вправо.
+    // На время осмотра центр масс переносится в точку хвата, после — возвращается как было.
+    internal static class Stabilizer
+    {
+        private const float MinOffset = 0.02f;   // меньше 2 см — центр масс не трогаем
+        private const float TallOffset = 0.15f;  // высокий предмет, который держат за низ (гриб и т.п.)
+        private static Rigidbody _rig;
+        private static Vector3 _savedCom;
+        private static Behaviour[] _disabled = new Behaviour[0];
+        private static readonly System.Collections.Generic.List<(Collider, Collider)> _ignored =
+            new System.Collections.Generic.List<(Collider, Collider)>();
+        private static readonly System.Collections.Generic.HashSet<string> _logged = new System.Collections.Generic.HashSet<string>();
+        private static object _item;
+
+        // Высокие предметы не подтягиваем так близко к лицу — иначе верхушка упирается в голову.
+        public static float TowardFaceScale { get; private set; } = 1f;
+
+        public static void Begin(object character, object item)
+        {
+            if (item == null || ReferenceEquals(item, _item)) return;
+            Restore();
+            _item = item;
+            Rigidbody rig = Refs.ItemRig(item);
+            if (rig == null) return;
+
+            var comps = new System.Collections.Generic.List<Behaviour>();
+            foreach (var b in ((Component)item).GetComponents<Behaviour>())
+                if (b != null && b.enabled && b.GetType().Name == "CenterOfMass") comps.Add(b);
+
+            Vector3 com = rig.centerOfMass;
+            string name = ((Component)item).name.Replace("(Clone)", "");
+            if (_logged.Add(name))
+                Plugin.Info($"{name}: центр масс {com} ({com.magnitude:0.000} м от точки хвата), " +
+                            $"CenterOfMass: {(comps.Count > 0 ? "есть" : "нет")}");
+
+            TowardFaceScale = com.magnitude >= TallOffset ? 0.3f : 1f;
+            IgnoreOwnBody(character, item);
+
+            if (comps.Count == 0 && com.magnitude < MinOffset) return;
+            _rig = rig;
+            _savedCom = com;
+            _disabled = comps.ToArray();
+            foreach (var b in _disabled) b.enabled = false; // иначе он вернёт центр масс в следующем FixedUpdate
+            rig.centerOfMass = Vector3.zero;
+        }
+
+        // Пока осматриваем, предмет не толкается о собственного персонажа (голову, плечи, руки).
+        private static void IgnoreOwnBody(object character, object item)
+        {
+            if (character == null) return;
+            var mine = ((Component)item).GetComponentsInChildren<Collider>();
+            var body = ((Component)character).GetComponentsInChildren<Collider>();
+            foreach (var a in mine)
+            {
+                if (a == null || !a.enabled || a.isTrigger) continue;
+                foreach (var b in body)
+                {
+                    if (b == null || b.isTrigger || Physics.GetIgnoreCollision(a, b)) continue;
+                    Physics.IgnoreCollision(a, b, true);
+                    _ignored.Add((a, b));
+                }
+            }
+        }
+
+        public static void Restore()
+        {
+            if (_rig != null) _rig.centerOfMass = _savedCom;
+            foreach (var b in _disabled) if (b != null) b.enabled = true;
+            foreach (var (a, b) in _ignored) if (a != null && b != null) Physics.IgnoreCollision(a, b, false);
+            _ignored.Clear();
+            _rig = null;
+            _item = null;
+            _disabled = new Behaviour[0];
+            TowardFaceScale = 1f;
         }
     }
 
