@@ -1,0 +1,9 @@
+{
+    "name": "ItemInspect",
+    "version_number": "1.0.0",
+    "website_url": "https://github.com/Toderonss/ItemInspect",
+    "description": "CS2-style item inspect: press F to look over the item in your hands, with its own animation for each kind of item. Bonus: knife swing on LMB.",
+    "dependencies": [
+        "BepInEx-BepInExPack_PEAK-5.4.2403"
+    ]
+}
